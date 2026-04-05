@@ -1,0 +1,22 @@
+name: Dev Deployment
+
+on:
+    push:
+        branches:
+            - developer
+
+permissions:
+    id-token: write
+    contents: read
+
+jobs:
+    terraform-dev:
+        uses: ./.github/workflows/terraform.yml
+        with:
+            environment: dev
+            aws-region: us-east-1
+
+        secrets:
+            aws-assume-role-arn: ${{ secrets.AWS_ASSUME_ROLE_ARN }}
+            aws-s3-bucket-backend-statefile: ${{ secrets.AWS_S3_BUCKET_BACKEND_STATEFILE }}
+            aws-dynamodb-table-backend-lock: ${{ secrets.AWS_DYNAMODB_TABLE_BACKEND_LOCK }}
