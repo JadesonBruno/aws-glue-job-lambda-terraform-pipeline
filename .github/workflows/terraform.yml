@@ -1,0 +1,84 @@
+name: "Terraform Workflow"
+
+on:
+    workflow_call:
+        inputs:
+            environment:
+                description: "The environment to deploy to (e.g., dev, main)"
+                required: true
+                type: string
+            aws-region:
+                description: "The AWS region to deploy to"
+                type: string
+                default: "us-east-1"
+        secrets:
+            aws-assume-role-arn:
+                description: "The ARN of the AWS role to assume for deployment"
+                required: true
+            aws-s3-bucket-backend-statefile:
+                description: "The name of the S3 bucket to use for Terraform state file"
+                required: true
+            aws-dynamodb-table-backend-lock:
+                description: "The name of the DynamoDB table to use for Terraform state file locking"
+                required: true
+
+jobs:
+    terraform:
+        runs-on: ubuntu-latest
+        defaults:
+            run:
+                shell: bash
+        steps:
+            - name: "Checkout Code"
+              uses: actions/checkout@v6
+
+            - name: "Set Up Terraform"
+              uses: hashicorp/setup-terraform@v4
+              with:
+                terraform_version: "1.14.8"
+
+            - name: "Configure AWS Credentials"
+              uses: aws-actions/configure-aws-credentials@v6
+              with:
+                role-session-name: "github-to-aws-via-federated-oidc"
+                role-to-assume: ${{ secrets.aws-assume-role-arn }}
+                aws-region: ${{ inputs.aws-region }}
+
+            - name: "Read Destroy Configuration"
+              id: read-destroy-config
+              run: |
+                DESTROY="$(jq -r '.["${{ inputs.environment }}"]' ./terraform/destroy_config.json)"
+                echo "destroy=$DESTROY" >> $GITHUB_OUTPUT
+
+            - name: "Initialize Terraform"
+              run: |
+                cd terraform && terraform init \
+                    -backend-config="bucket=${{ secrets.aws-s3-bucket-backend-statefile }}" \
+                    -backend-config="workspace_key_prefix=${{ github.event.repository.name }}" \
+                    -backend-config="key=terraform.tfstate" \
+                    -backend-config="dynamodb_table=${{ secrets.aws-dynamodb-table-backend-lock }}" \
+                    -backend-config="region=${{ inputs.aws-region }}"
+
+            - name: "Terraform Validate"
+              run: cd terraform && terraform validate
+
+            - name: "Terraform Destroy"
+              if: steps.read-destroy-config.outputs.destroy == 'true'
+              run: |
+                cd terraform && \
+                (terraform workspace select ${{ inputs.environment }} || terraform workspace new ${{ inputs.environment }}) && \
+                terraform destroy -var-file=./envs/${{ inputs.environment }}/terraform.tfvars -auto-approve
+
+            - name: "Terraform Plan"
+              if: steps.read-destroy-config.outputs.destroy != 'true'
+              run: |
+                cd terraform && \
+                (terraform workspace select ${{ inputs.environment }} || terraform workspace new ${{ inputs.environment }}) && \
+                terraform plan -var-file=./envs/${{ inputs.environment }}/terraform.tfvars -out="${{ inputs.environment }}.tfplan"
+
+            - name: "Terraform Apply"
+              if: steps.read-destroy-config.outputs.destroy != 'true'
+              run: |
+                cd terraform && \
+                (terraform workspace select ${{ inputs.environment }} || terraform workspace new ${{ inputs.environment }}) && \
+                terraform apply "${{ inputs.environment }}.tfplan" 
